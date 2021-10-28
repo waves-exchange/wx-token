@@ -1,0 +1,135 @@
+{-# STDLIB_VERSION 5 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+let SCALE8  = 8
+let MULT8   = 100000000
+let SCALE18 = 18
+let MULT18  = 1000_000_000_000_000_000.toBigInt() # 10^18
+let SEP     = "__"
+
+func getStringOrFail(key: String) = getString(key).valueOrErrorMessage("mandatory this." + key + " is not defined")
+func getStringByAddressOrFail(address: Address, key: String) = address.getString(key).valueOrErrorMessage("mandatory " + address.toString() + "." + key + " is not defined")
+
+func getIntOrZero(address: Address, key: String)      = address.getInteger(key).valueOrElse(0)
+func getIntOrFail(address: Address, key: String)      = address.getInteger(key).valueOrErrorMessage("mandatory this." + key + " is not defined")
+
+# FACTORY API
+func keyFactoryAddress()  = "%s%s__config__factoryAddress"
+func keyFactoryLp2AssetsMapping(lpAssetStr: String) = makeString(["%s%s%s", lpAssetStr, "mappings__lpAsset2PoolContract"], SEP)
+func keyFactoryLpList()   = "%s__lpTokensList"
+func keyFactoryCfg()      = "%s__factoryConfig"
+
+func readFactoryAddressOrFail() = getStringOrFail(keyFactoryAddress()).addressFromStringValue()
+func readLpList()               = readFactoryAddressOrFail().getString(keyFactoryLpList()).valueOrElse("").split(SEP)
+func readFactoryCfgOrFail()     = readFactoryAddressOrFail().getStringByAddressOrFail(keyFactoryCfg()).split(SEP)
+
+# LP STAKING API
+func keyStakedByUser(userAddressStr: String, lpAssetIdStr: String) = makeString(["%s%s%s__staked", userAddressStr, lpAssetIdStr], SEP)
+func keyStakedTotal(lpAssetIdStr: String) = "%s%s%s__staked__total__" + lpAssetIdStr
+
+func getStakingAddressOrFail(factoryCfg: List[String]) = factoryCfg[1].addressFromStringValue()
+
+func internalCurrentRewardRate(stakingContract: Address, lpAssetId: String) = {
+  let wxEmissionPerBlock = 0
+  let maxFactor = 1*MULT8
+  let totalLpStaked = stakingContract.getIntOrZero(keyStakedTotal(lpAssetId))
+  [wxEmissionPerBlock, maxFactor, totalLpStaked]
+}
+
+@Callable(i)
+func constructor(factoryAddress: String) = {
+  if (i.caller != this) then throw("not authorized") else
+  [StringEntry(keyFactoryAddress(), factoryAddress)]
+}
+
+@Callable(i)
+func currentRewardRateREADONLY(lpAssetId: String) = {
+  let factoryCfgArray = readFactoryCfgOrFail()
+  let stakingContract = factoryCfgArray.getStakingAddressOrFail()
+
+  let rewardData      = stakingContract.internalCurrentRewardRate(lpAssetId)
+
+  let wxEmissionPerBlock  = rewardData[0]
+  let maxFactor           = rewardData[1]
+  let totalLpStaked       = rewardData[2]
+
+  ([], makeString(["%d%d%d",
+          wxEmissionPerBlock.toString(),
+          maxFactor.toString(),
+          totalLpStaked.toString()],
+    SEP))
+}
+
+@Callable(i)
+func currentUserRewardRateREADONLY(lpAssetId: String, userAddress: String) = {
+  let factoryCfgArray = readFactoryCfgOrFail()
+  let stakingContract = factoryCfgArray.getStakingAddressOrFail()
+
+  let rewardData      = stakingContract.internalCurrentRewardRate(lpAssetId)
+
+  let wxEmissionPerBlock  = rewardData[0]
+  let maxFactor           = rewardData[1]
+  let totalLpStaked       = rewardData[2]
+
+  let lpStakedByUser = stakingContract.getIntOrZero(keyStakedByUser(userAddress, lpAssetId))
+  let boostingPower = 1 * MULT8
+
+  ([], makeString(["%d%d%d",
+        wxEmissionPerBlock.toString(),
+        maxFactor.toString(),
+        totalLpStaked.toString(),
+        lpStakedByUser.toString(),
+        boostingPower.toString()],
+    SEP))
+}
+
+#let resultOneLp = "%s%d%d%d%s%s__${lp1}__${minRewardClaimed1}__${boostRewardClaimed1}__${gFeeClaimed1}__end__${user}"
+#let resultTwoLp = "%s%d%d%d%s%s%d%d%d%s%s__${lp1}__${minRewardClaimed1}__${boostRewardClaimed1}__${gFeeClaimed1}__end__${lp2}__${minRewardClaimed2}__${boostRewardClaimed2}__${gFeeClaimed2}__end__${user}"
+@Callable(i)
+func claimedRewardREADONLY(userAddress: String) = {
+  let lpList = readLpList()
+  let prefix = "%s%d%d%d%s"
+
+  func claimedRewardByLpAggregator(resultStr: String, nextLp: String) = {
+    let rand = nextLp.fromBase58String().toInt() % 100000 + userAddress.toBytes().toInt() % 100000
+    let absRand = if (rand < 0) then -rand else rand
+    let val = absRand % 100 * MULT8 + absRand * (MULT8 / 100000)
+    let minRewardClaimed    = 0 #val / 6 * 2
+    let boostRewardClaimed  = 0 #val / 6 * 3
+    let gFeeClaimed         = 0 #val / 6
+
+    makeString([prefix + resultStr, nextLp, minRewardClaimed.toString(), boostRewardClaimed.toString(), gFeeClaimed.toString(), "end"], SEP)
+  }
+
+  let result = FOLD<10>(lpList, "%s", claimedRewardByLpAggregator)
+
+  ([], result + SEP + userAddress)
+}
+
+@Callable(i)
+func calcBoostREADONLY(deltaWxAmount: Int, deltaLockPeriodInBlocks: Int, deltaLpAmount: Int, lpAssetIdOpt: String, userAddressOpt: String) = {
+  let boost = if (userAddressOpt != "") then 3 * MULT8 else 1 * MULT8
+
+  let monthes18 = fraction(deltaLockPeriodInBlocks.toBigInt(), MULT18, (30*1440).toBigInt())
+  let coeff18 = pow(monthes18, SCALE18, 2.toBigInt(), 0, SCALE18, HALFUP) / 100.toBigInt()
+  let gWxAmount = fraction(deltaWxAmount.toBigInt(), coeff18, MULT18)
+  ([], makeString(["%d%d", gWxAmount.toInt().toString(), boost.toString()], SEP))
+}
+
+@Callable(i)
+func wxEmissionStatsREADONLY() = {
+  let ONEMULT = MULT8.toString()
+  let ONE = "1"
+
+  let totalWxReleased = 0
+  let totalWxLocked = 0
+  let locksDurationSumInBlocks = 0
+  let locksCount = 0
+  ([], makeString(["%d%d%d%d",
+          totalWxReleased.toString(),
+          totalWxLocked.toString(),
+          locksDurationSumInBlocks.toString(),
+          locksCount.toString()],
+    SEP))
+}
