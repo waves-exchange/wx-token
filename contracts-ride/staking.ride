@@ -1,0 +1,100 @@
+{-# STDLIB_VERSION 5 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+let SEP = "__"
+func getStringOrFail(key: String) = getString(key).valueOrErrorMessage("mandatory this." + key + " is not defined")
+func getStringByAddressOrFail(address: Address, key: String) = address.getString(key).valueOrErrorMessage("mandatory " + address.toString() + "." + key + " is not defined")
+
+# FACTORY API
+func keyFactoryAddress() = "%s%s__config__factoryAddress"
+func keyFactoryLp2AssetsMapping(lpAssetStr: String) = makeString(["%s%s%s", lpAssetStr, "mappings__lpAsset2PoolContract"], SEP)
+func readFactoryAddressOrFail() = getStringOrFail(keyFactoryAddress()).addressFromStringValue()
+
+# OWN KEYS
+func keyStakedByUser(userAddressStr: String, lpAssetIdStr: String) = makeString(["%s%s%s__staked", userAddressStr, lpAssetIdStr], SEP)
+func keyStakedTotal(lpAssetIdStr: String) = "%s%s%s__staked__total__" + lpAssetIdStr
+
+func readStaked(key: String) = this.getInteger(key).valueOrElse(0)
+
+
+func keyOperationHistoryRecord(type: String, userAddress: String, txId58: String) = {
+    makeString(["%s%s%s%s__history",
+        type,
+        userAddress,
+        txId58],
+    SEP)
+}
+
+func formatHistoryRecord(userAddress: String, lpAssetId: String, type: String, amount: Int) = {
+  makeString(["%s%s%s%d%d%d", userAddress, lpAssetId, type, height.toString(), lastBlock.timestamp.toString(), amount.toString()],  SEP)
+}
+
+func OperationHistoryEntry(type: String, userAddress: String, lpAssetId: String, amount: Int, txId: ByteVector) = {
+  StringEntry(
+      keyOperationHistoryRecord(type, userAddress, txId.toBase58String()),
+      formatHistoryRecord(userAddress, lpAssetId, type, amount))
+}
+
+@Callable(i)
+func constructor(factoryAddressStr: String) = {
+  if (i.caller != this) then throw("not authorized") else
+  [StringEntry(keyFactoryAddress(), factoryAddressStr)]
+}
+
+@Callable(i)
+func stake() = {
+  let factory = readFactoryAddressOrFail()
+
+  if (i.payments.size() != 1) then throw("invalid payment - exact one payment must be attached") else
+  let pmt = i.payments[0]
+  let lpAssetId = pmt.assetId.value()
+  let lpAssetIdStr = lpAssetId.toBase58String()
+  let amount = pmt.amount
+
+  let lpDappStr = factory.getString(keyFactoryLp2AssetsMapping(lpAssetIdStr)).valueOrErrorMessage("unsupported lp asset " + lpAssetIdStr)
+  let callerStr = i.caller.toString()
+  let userAddressStr = if (callerStr == lpDappStr) then i.originCaller.toString() else callerStr
+
+  let stakedByUserKEY = keyStakedByUser(userAddressStr, lpAssetIdStr)
+  let stakedTotalKEY = keyStakedTotal(lpAssetIdStr)
+
+  let stakedByUser = stakedByUserKEY.readStaked()
+  let stakedTotal = stakedTotalKEY.readStaked()
+
+  [IntegerEntry(stakedByUserKEY, stakedByUser + amount),
+    IntegerEntry(stakedTotalKEY, stakedTotal + amount),
+    OperationHistoryEntry("stake", userAddressStr, lpAssetIdStr, amount, i.transactionId)]
+}
+
+@Callable(i)
+func unstake(lpAssetIdStr: String, amount: Int) = {
+  let factory = readFactoryAddressOrFail()
+
+  let userAddressStr = i.caller.toString()
+  let lpAssetId = lpAssetIdStr.fromBase58String()
+
+  if (!factory.getString(keyFactoryLp2AssetsMapping(lpAssetIdStr)).isDefined()) then throw("unsupported lp asset " + lpAssetIdStr) else
+
+  let stakedByUserKEY = keyStakedByUser(userAddressStr, lpAssetIdStr)
+  let stakedTotalKEY = keyStakedTotal(lpAssetIdStr)
+
+  let stakedByUser = stakedByUserKEY.readStaked()
+  let stakedTotal = stakedTotalKEY.readStaked()
+
+  if (amount > stakedByUser) then throw("passed amount is less then available") else
+  [IntegerEntry(stakedByUserKEY, stakedByUser - amount),
+    IntegerEntry(stakedTotalKEY, stakedTotal - amount),
+    ScriptTransfer(i.caller, amount, lpAssetId),
+    OperationHistoryEntry("unstake", userAddressStr, lpAssetIdStr, amount, i.transactionId)]
+}
+
+@Callable(i)
+func claimWx(lpAssetIdStr: String) = {
+  throw("temorary disabled")
+}
+
+@Callable(i)
+func claimWxREADONLY(lpAssetIdStr: String, userAddress: String) = {
+  ([], makeString(["%s%s%d", lpAssetIdStr, userAddress, "0"], SEP))
+}
