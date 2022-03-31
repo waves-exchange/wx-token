@@ -1,0 +1,133 @@
+{-# STDLIB_VERSION 5 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+let SEP = "__"
+let EMPTY = ""
+
+func throwPD() = "Permission denied".throw()
+func throwNoAsset() = "Asset doesn't exists".throw()
+
+func keyManagerPublicKey() = "%s__managerPublicKey"
+func keyPendingManagerPublicKey() = "%s__pendingManagerPublicKey"
+func keyAdminPubKeys() = "%s__adminPubKeys"
+func keyCreated(assetId: String) = "created_<"+assetId+">"
+func keyLogo(assetId: String) = "logo_<"+assetId+">"
+func keyTicker(assetId: String) = "ticker_<"+assetId+">"
+func keyStatus(assetId: String) = "status_<"+assetId+">"
+
+func managerPublicKeyOrUnit() = match keyManagerPublicKey().getString() {
+  case s: String => s.fromBase58String()
+  case _: Unit => unit
+}
+
+func pendingManagerPublicKeyOrUnit() = match keyPendingManagerPublicKey().getString() {
+  case s: String => s.fromBase58String()
+  case _: Unit => unit
+}
+
+func mustManager(i: Invocation) = {
+  match managerPublicKeyOrUnit() {
+    case pk: ByteVector => i.callerPublicKey == pk || throwPD()
+    case _: Unit => i.caller == this || throwPD()
+  }
+}
+
+func mustAdmin(i: Invocation) = {
+  let adminPKs = keyAdminPubKeys().getString().valueOrElse(EMPTY).split(SEP)
+  if (adminPKs.containsElement(i.callerPublicKey.toBase58String())) then {
+    true
+  } else {
+      strict isManager = i.mustManager()
+      true
+  }
+}
+
+func isCreated(assetId: String) = {
+  keyCreated(assetId).getBoolean().valueOrElse(false) 
+}
+
+func verifiedToStatus(verified: Boolean) = {
+  if(verified) then 2 else 0
+}
+
+@Callable(i)
+func createOrUpdate(assetId: String, ticker: String, logo: String, verified: Boolean) = {
+  strict checkCaller = i.mustAdmin()
+
+  strict checkAssetId = assetId.fromBase58String().assetInfo().valueOrErrorMessage("Invalid asset ID")
+  strict isCreatedNow = !assetId.isCreated()
+
+  let setLogoActions = if (logo == "") then [] else [StringEntry(keyLogo(assetId), logo)]
+
+  ([
+    BooleanEntry(keyCreated(assetId), true),
+    StringEntry(keyTicker(assetId), ticker),
+    IntegerEntry(keyStatus(assetId), verifiedToStatus(verified))
+  ] ++ setLogoActions, isCreatedNow)
+}
+
+@Callable(i)
+func setTicker(assetId: String, ticker: String) = {
+  strict checks = [
+    i.mustAdmin(),
+    assetId.isCreated() || throwNoAsset()
+  ]
+
+  [StringEntry(keyTicker(assetId), ticker)]
+}
+
+@Callable(i)
+func setLogo(assetId: String, logo: String) = {
+  strict checks = [
+    i.mustAdmin(),
+    assetId.isCreated() || throwNoAsset()
+  ]
+
+  [StringEntry(keyLogo(assetId), logo)]
+}
+
+@Callable(i)
+func setVerified(assetId: String, verified: Boolean) = {
+  strict checks = [
+    i.mustAdmin(),
+    assetId.isCreated() || throwNoAsset()
+  ]
+
+  [IntegerEntry(keyStatus(assetId), verifiedToStatus(verified))]
+}
+
+@Callable(i)
+func setAdmins(adminPubKeys: List[String]) = {
+  strict checkCaller = i.mustManager()
+  [StringEntry(keyAdminPubKeys(), adminPubKeys.makeString(SEP))]
+}
+
+@Callable(i)
+func setManager(pendingManagerPublicKey: String) = {
+  strict checkCaller = i.mustManager()
+  strict checkManagerPublicKey = pendingManagerPublicKey.fromBase58String()
+
+  [StringEntry(keyPendingManagerPublicKey(), pendingManagerPublicKey)]
+}
+
+@Callable(i)
+func confirmManager() = {
+  let pm = pendingManagerPublicKeyOrUnit()
+  strict hasPM = pm.isDefined() || "No pending manager".throw()
+  strict checkPM = i.callerPublicKey == pm.value() || "You are not pending manager".throw()
+
+  [
+    StringEntry(keyManagerPublicKey(), pm.value().toBase58String()),
+    DeleteEntry(keyPendingManagerPublicKey())
+  ]
+}
+
+@Verifier(tx)
+func verify() = {
+  let targetPublicKey = match managerPublicKeyOrUnit() {
+    case pk: ByteVector => pk
+    case _: Unit => tx.senderPublicKey
+  }
+  sigVerify(tx.bodyBytes, tx.proofs[0], targetPublicKey)
+}
